@@ -9,6 +9,23 @@ use indexmap::IndexSet;
 #[cfg(feature = "derive")]
 pub use lume_architect_derive::cached_query;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryError {
+    Cycle,
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cycle => write!(f, "cycle detected"),
+        }
+    }
+}
+
+impl std::error::Error for QueryError {}
+
+pub type QueryResult<T> = Result<T, QueryError>;
+
 /// Represents a unique index, referencing a [`Query`] within a [`Database`].
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct QueryId(usize);
@@ -302,7 +319,12 @@ impl Database {
     /// the key could not be found within the instance, `f` is invoked and the
     /// result is cloned and inserted into the instance. After the result is
     /// stored, the original result is returned.
-    pub fn execute_query<K: Hash, T: Clone + 'static>(&self, name: &str, key: &K, f: impl FnOnce() -> T) -> T {
+    pub fn execute_query<K: Hash, T: Clone + 'static>(
+        &self,
+        name: &str,
+        key: &K,
+        f: impl FnOnce() -> T,
+    ) -> QueryResult<T> {
         self.call_query(name, key, |query| query.get_or_insert(key, f).clone())
     }
 
@@ -322,7 +344,7 @@ impl Database {
         name: &str,
         key: &K,
         f: impl FnOnce() -> Result<T, E>,
-    ) -> Result<T, E> {
+    ) -> QueryResult<Result<T, E>> {
         self.call_query(name, key, |query| Ok(query.get_or_insert_result(key, f)?.clone()))
     }
 
@@ -335,20 +357,20 @@ impl Database {
     /// database to detect for cycles. If a cycle is found, the
     /// corresponding query handler is invoked. If none is found, the method
     /// panics.
-    fn call_query<K: Hash, T>(&self, name: &str, key: &K, f: impl FnOnce(&mut Query) -> T) -> T {
+    fn call_query<K: Hash, T>(&self, name: &str, key: &K, f: impl FnOnce(&mut Query) -> T) -> QueryResult<T> {
         let query_id = QueryId::from_name(name);
         let result_key = ResultKey::from_hashable(key);
 
         // If the query with the same arguments already exists within the set,
         // we're in a cycle.
         if !self.write().active.insert((query_id, result_key)) {
-            unimplemented!()
+            return Err(QueryError::Cycle);
         }
 
         let result = f(self.query_mut(name).deref_mut());
         self.write().active.pop();
 
-        result
+        Ok(result)
     }
 }
 

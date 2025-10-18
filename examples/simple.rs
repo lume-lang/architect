@@ -16,11 +16,13 @@ fn main() {
 
     let _ = ctx
         .db()
-        .execute_query("get_name", &"user_name", || String::from("Admin"));
+        .execute_query("get_name", &"user_name", || String::from("Admin"))
+        .unwrap();
 
     let result = ctx
         .db()
-        .execute_query("get_name", &"user_name", || String::from("Username"));
+        .execute_query("get_name", &"user_name", || String::from("Username"))
+        .unwrap();
 
     assert_eq!(result, String::from("Admin"));
 }
