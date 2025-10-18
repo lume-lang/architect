@@ -111,6 +111,7 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
     let ItemFn { sig, block, .. } = &input;
     let Signature { ident, output, .. } = sig;
 
+    let query_name = determine_query_name(input);
     let return_type = determine_cache_value_type(args, output);
 
     let db_expr = if let Some(db_expr) = &args.db_expr {
@@ -154,9 +155,24 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
     quote! {
         let __hash = #calculate_hash_expr;
         let __db = ::lume_architect::DatabaseContext::db(#db_expr);
-        let mut __query = __db.get_or_add_query(stringify!(#ident), || { #query_flags });
+        let mut __query = __db.get_or_add_query(#query_name, || { #query_flags });
 
         #get_value
+    }
+}
+
+fn determine_query_name(input: &ItemFn) -> proc_macro2::TokenStream {
+    let ident = input.sig.ident.to_token_stream();
+
+    if let Some(receiver) = input.sig.receiver() {
+        let rec = receiver.self_token;
+
+        quote! { &format!("{}::{}",
+            ::std::any::type_name_of_val(#rec),
+            stringify!(#ident)
+        ) }
+    } else {
+        quote! { stringify!(#ident) }
     }
 }
 
