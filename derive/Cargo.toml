@@ -3,6 +3,12 @@ name = "lume_architect_derive"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Library for creating memoized queries, in a simple way"
+authors = ["Max T. Kristiansen <me@maxtrier.dk>"]
+license = "MIT"
+keywords = ["memo", "query"]
+repository = "https://github.com/lume-lang/architect"
+readme = "../README.md"
 
 [lib]
 test = false
