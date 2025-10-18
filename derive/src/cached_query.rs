@@ -109,7 +109,10 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
     } else if let Some(receiver) = input.sig.receiver() {
         receiver.self_token.to_token_stream()
     } else {
-        todo!()
+        return quote_spanned! {
+            input.span() =>
+            compile_error!("could not find Database reference: no receiver found");
+        };
     };
 
     let query_flags = get_query_flags(args);
