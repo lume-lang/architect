@@ -12,10 +12,15 @@ impl DatabaseContext for Context {
 
 fn main() {
     let ctx = Context { db: Database::new() };
-    let mut query = ctx.db().get_or_add_query("get_name", QueryFlags::empty);
+    ctx.db().ensure_query_exists("get_name", QueryFlags::empty);
 
-    let _ = query.get_or_insert(&"user_name", || String::from("Admin"));
-    let result = query.get_or_insert(&"user_name", || String::from("Admin"));
+    let _ = ctx
+        .db()
+        .execute_query("get_name", &"user_name", || String::from("Admin"));
 
-    println!("Result: {result:?}");
+    let result = ctx
+        .db()
+        .execute_query("get_name", &"user_name", || String::from("Username"));
+
+    assert_eq!(result, String::from("Admin"));
 }

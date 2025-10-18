@@ -109,10 +109,9 @@ pub(crate) fn cached_query(args: TokenStream, input: TokenStream) -> TokenStream
 
 fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStream {
     let ItemFn { sig, block, .. } = &input;
-    let Signature { ident, output, .. } = sig;
+    let Signature { ident, .. } = sig;
 
     let query_name = determine_query_name(input);
-    let return_type = determine_cache_value_type(args, output);
 
     let db_expr = if let Some(db_expr) = &args.db_expr {
         db_expr.into_token_stream()
@@ -146,18 +145,19 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
         s.finish()
     } };
 
-    let get_value = if args.result {
-        quote! { __query.get_or_insert_result::<u64, #return_type>(&__hash, || #block)?.clone() }
+    let execute_query = if args.result {
+        quote! { __db.execute_query_result(#query_name, &__hash, || { #block }) }
     } else {
-        quote! { __query.get_or_insert::<u64, #return_type>(&__hash, || #block).clone() }
+        quote! { __db.execute_query(#query_name, &__hash, || { #block }) }
     };
 
     quote! {
         let __hash = #calculate_hash_expr;
         let __db = ::lume_architect::DatabaseContext::db(#db_expr);
-        let mut __query = __db.get_or_add_query(#query_name, || { #query_flags });
 
-        #get_value
+        __db.ensure_query_exists(#query_name, || { #query_flags });
+
+        #execute_query
     }
 }
 
@@ -173,31 +173,6 @@ fn determine_query_name(input: &ItemFn) -> proc_macro2::TokenStream {
         ) }
     } else {
         quote! { stringify!(#ident) }
-    }
-}
-
-fn determine_cache_value_type(args: &CacheMacroArgs, ty: &ReturnType) -> proc_macro2::TokenStream {
-    let output_ty = match ty {
-        ReturnType::Default => return quote! { () },
-        ReturnType::Type(_, ty) => ty,
-    };
-
-    if args.result {
-        if let syn::Type::Path(type_path) = *output_ty.clone() {
-            let segments = type_path.path.segments;
-
-            if let syn::PathArguments::AngleBracketed(brackets) = &segments.last().unwrap().arguments {
-                let inner_ty = brackets.args.first().unwrap();
-
-                quote_spanned!(ty.span() => #inner_ty)
-            } else {
-                panic!("method return type has no inner type")
-            }
-        } else {
-            panic!("method return type is too complex")
-        }
-    } else {
-        quote_spanned!(ty.span() => #output_ty)
     }
 }
 

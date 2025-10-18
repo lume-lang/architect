@@ -9,7 +9,7 @@ lume_architect_derive = { path = "derive", optional = true }
 
 bitflags = "^2"
 fxhash = "^0"
-parking_lot = "^0"
+indexmap = "^2"
 
 [features]
 default = ["derive"]
@@ -25,9 +25,6 @@ rust-version = "1.88.0"
 edition = "2024"
 authors = ["Max T. Kristiansen <me@maxtrier.dk>"]
 license = "MIT"
-
-[workspace.dependencies]
-petgraph = { version = "0.8" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -1,12 +1,13 @@
 use std::any::Any;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::LazyLock;
+use std::ops::DerefMut;
 
 use bitflags::bitflags;
+use indexmap::IndexSet;
 #[cfg(feature = "derive")]
 pub use lume_architect_derive::cached_query;
-use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Represents a unique index, referencing a [`Query`] within a [`Database`].
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -163,18 +164,13 @@ impl Query {
 }
 
 /// Inner, non-locked version of [`Database`].
+#[derive(Default)]
 pub(crate) struct DatabaseInner {
     pub(crate) queries: HashMap<QueryId, Query>,
+    pub(crate) active: IndexSet<(QueryId, ResultKey)>,
 }
 
 impl DatabaseInner {
-    /// Creates a new empty [`Database`].
-    pub fn new() -> Self {
-        Self {
-            queries: HashMap::new(),
-        }
-    }
-
     /// Clears all results from the query with the given name.
     #[inline]
     pub fn clear(&mut self, query: &str) {
@@ -236,40 +232,30 @@ impl DatabaseInner {
     }
 }
 
+#[derive(Default)]
 pub struct Database {
-    inner: LazyLock<RwLock<DatabaseInner>>,
+    inner: UnsafeCell<DatabaseInner>,
 }
 
 impl Database {
     /// Creates a new empty [`Database`].
-    pub const fn new() -> Self {
-        Self {
-            inner: LazyLock::new(|| RwLock::new(DatabaseInner::new())),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Retrieves a shared read access to the [`DatabaseInner`]'s inner
     /// instance.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if another thread write-locked the store before
-    /// this method was invoked, without releasing the lock.
     #[inline]
-    pub(crate) fn read(&self) -> RwLockReadGuard<'_, DatabaseInner> {
-        self.inner.read()
+    pub(crate) fn read(&self) -> &DatabaseInner {
+        unsafe { self.inner.get().as_ref() }.unwrap()
     }
 
     /// Retrieves an exclusive-write access to the [`DatabaseInner`]'s inner
     /// instance.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if another thread write-locked the store before
-    /// this method was invoked, without releasing the lock.
     #[inline]
-    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, DatabaseInner> {
-        self.inner.write()
+    #[expect(clippy::mut_from_ref)]
+    pub(crate) fn write(&self) -> &mut DatabaseInner {
+        unsafe { self.inner.get().as_mut() }.unwrap()
     }
 
     /// Clears all results from the query with the given name.
@@ -286,53 +272,83 @@ impl Database {
 
     /// Retrieves a shared read access to the [`Query`] which matches the given
     /// query name.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if another thread write-locked the query before
-    /// this method was invoked, without releasing the lock.
-    pub fn query(&self, name: &str) -> MappedRwLockReadGuard<'_, Query> {
-        RwLockReadGuard::map(self.read(), |db| db.query(name))
+    pub fn query(&self, name: &str) -> &Query {
+        self.read().query(name)
     }
 
     /// Retrieves an exclusive-write access to the [`Query`] which matches the
     /// given query name.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if another thread write-locked the query before
-    /// this method was invoked, without releasing the lock.
-    pub fn query_mut(&self, name: &str) -> MappedRwLockWriteGuard<'_, Query> {
-        RwLockWriteGuard::map(self.write(), |db| db.query_mut(name))
+    pub fn query_mut(&self, name: &str) -> &mut Query {
+        self.write().query_mut(name)
     }
 
-    /// Retrieves an exclusive-write access to the [`Query`] which matches the
-    /// given query name, if it exists. If the query does not exist, a new
-    /// [`Query`] is added with the given name, using the flags returned by
-    /// `flags`.
+    /// Ensures that a [`Query`] with the given name exists. If the query does
+    /// not exist, a new [`Query`] is added with the given name, using the
+    /// flags returned by `flags`.
     ///
     /// # Panics
     ///
     /// This method panics if another thread write-locked the query before
     /// this method was invoked, without releasing the lock.
-    pub fn get_or_add_query(
-        &self,
-        name: &str,
-        flags: impl FnOnce() -> QueryFlags,
-    ) -> MappedRwLockWriteGuard<'_, Query> {
+    pub fn ensure_query_exists(&self, name: &str, flags: impl FnOnce() -> QueryFlags) {
         if !self.read().query_exists(name) {
             self.write().add_query(name, flags());
         }
-
-        RwLockWriteGuard::map(self.write(), |db| db.query_mut(name))
     }
-}
 
-impl Default for Database {
-    fn default() -> Self {
-        Self {
-            inner: LazyLock::new(|| RwLock::new(DatabaseInner::new())),
+    /// Looks up the given key within the query instance with the given name.
+    ///
+    /// If a value is found within the query, it is cloned and returned. If
+    /// the key could not be found within the instance, `f` is invoked and the
+    /// result is cloned and inserted into the instance. After the result is
+    /// stored, the original result is returned.
+    pub fn execute_query<K: Hash, T: Clone + 'static>(&self, name: &str, key: &K, f: impl FnOnce() -> T) -> T {
+        self.call_query(name, key, |query| query.get_or_insert(key, f).clone())
+    }
+
+    /// Looks up the given key within the query instance with the given name.
+    ///
+    /// If a value is found within the query, it is cloned and returned. If
+    /// the key could not be found within the instance, `f` is invoked and the
+    /// result is cloned and inserted into the instance. After the result is
+    /// stored, the original result is returned.
+    ///
+    /// # Errors
+    ///
+    /// If the given closure returns `Err`, this method will propagate the error
+    /// to the caller.
+    pub fn execute_query_result<K: Hash, T: Clone + 'static, E>(
+        &self,
+        name: &str,
+        key: &K,
+        f: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.call_query(name, key, |query| Ok(query.get_or_insert_result(key, f)?.clone()))
+    }
+
+    /// Calls the [`Query`] with the given name, passing it to the given closure
+    /// `f`.
+    ///
+    /// # Panics
+    ///
+    /// The query key is added to the set of active queries, allowing the
+    /// database to detect for cycles. If a cycle is found, the
+    /// corresponding query handler is invoked. If none is found, the method
+    /// panics.
+    fn call_query<K: Hash, T>(&self, name: &str, key: &K, f: impl FnOnce(&mut Query) -> T) -> T {
+        let query_id = QueryId::from_name(name);
+        let result_key = ResultKey::from_hashable(key);
+
+        // If the query with the same arguments already exists within the set,
+        // we're in a cycle.
+        if !self.write().active.insert((query_id, result_key)) {
+            unimplemented!()
         }
+
+        let result = f(self.query_mut(name).deref_mut());
+        self.write().active.pop();
+
+        result
     }
 }
 
