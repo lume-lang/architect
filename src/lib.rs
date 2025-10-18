@@ -36,7 +36,11 @@ impl ResultKey {
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct QueryFlags: u32 { }
+    pub struct QueryFlags: u32 {
+        /// Always re-compute the result of the query, even if a matching entry
+        /// already exists within the result set.
+        const ALWAYS = 1;
+    }
 }
 
 #[derive(Debug)]
@@ -77,10 +81,10 @@ impl Query {
     ///
     /// If no value could be found, or the value found is not of type [`T`],
     /// this method returns [`None`].
-    pub fn get<K: Hash, T: Clone + 'static>(&self, key: &K) -> Option<T> {
+    pub fn get<K: Hash, T: Clone + 'static>(&self, key: &K) -> Option<&T> {
         let key = ResultKey::from_hashable(key);
 
-        self.results.get(&key)?.downcast_ref::<T>().cloned()
+        self.results.get(&key)?.downcast_ref::<T>()
     }
 
     /// Inserts the given result into the query, indexed by the given key.
@@ -94,19 +98,67 @@ impl Query {
         self.results.insert(key, value);
     }
 
+    /// Determines whether the query contains a result for the given key.
+    ///
+    /// The value used for the key must be the same as the key used when
+    /// inserting the value.
+    pub fn contains<K: Hash>(&self, key: &K) -> bool {
+        let key = ResultKey::from_hashable(key);
+
+        self.results.contains_key(&key)
+    }
+
+    /// Looks up the given key within the query instance.
+    ///
+    /// If a value is found within the query, it is returned as a reference. If
+    /// the key could not be found within the instance, returns [`None`].
+    /// stored, the original result is returned.
+    fn value_of<K: Hash, T: Clone + 'static>(&self, key: &K) -> Option<&T> {
+        let key = ResultKey::from_hashable(key);
+        let value = self.results.get(&key)?;
+
+        Some(
+            value
+                .downcast_ref::<T>()
+                .unwrap_or_else(|| panic!("could not convert result `{}.!{}` to type of T", self.name, key.0)),
+        )
+    }
+
     /// Looks up the given key within the query instance.
     ///
     /// If a value is found within the query, it is returned as a reference. If
     /// the key could not be found within the instance, `f` is invoked and the
     /// result is cloned and inserted into the instance. After the result is
     /// stored, the original result is returned.
-    pub fn get_or_insert<K: Hash, T: Clone + 'static, F: FnOnce() -> T>(&mut self, key: &K, f: F) -> &T {
-        let key = ResultKey::from_hashable(key);
-        let value = self.results.entry(key).or_insert_with(|| Box::new(f()) as Box<dyn Any>);
+    pub fn get_or_insert<K: Hash, T: Clone + 'static>(&mut self, key: &K, f: impl FnOnce() -> T) -> &T {
+        if self.flags.contains(QueryFlags::ALWAYS) || !self.contains(key) {
+            self.insert(key, f());
+        }
 
-        value
-            .downcast_ref::<T>()
-            .unwrap_or_else(|| panic!("could not convert result `{}.!{}` to type of T", self.name, key.0))
+        self.value_of(key).unwrap()
+    }
+
+    /// Looks up the given key within the query instance.
+    ///
+    /// If a value is found within the query, it is returned as a reference. If
+    /// the key could not be found within the instance, `f` is invoked and the
+    /// result is cloned and inserted into the instance. After the result is
+    /// stored, the original result is returned.
+    ///
+    /// # Errors
+    ///
+    /// If the given closure returns `Err`, this method will propagate the error
+    /// to the caller.
+    pub fn get_or_insert_result<K: Hash, T: Clone + 'static, E>(
+        &mut self,
+        key: &K,
+        f: impl FnOnce() -> Result<T, E>,
+    ) -> Result<&T, E> {
+        if self.flags.contains(QueryFlags::ALWAYS) || !self.contains(key) {
+            self.insert(key, f()?);
+        }
+
+        Ok(self.value_of(key).unwrap())
     }
 }
 

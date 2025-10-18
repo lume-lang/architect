@@ -1,7 +1,7 @@
 use darling::FromMeta;
 use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
-use quote::{ToTokens, quote, quote_spanned};
+use quote::{ToTokens, TokenStreamExt, quote, quote_spanned};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Expr, ItemFn, ReturnType, Signature, parse_macro_input};
@@ -16,6 +16,15 @@ struct CacheMacroArgs {
 
     #[darling(default)]
     result: bool,
+
+    #[darling(flatten)]
+    flags: CacheMacroFlags,
+}
+
+#[derive(Default, Debug, FromMeta)]
+struct CacheMacroFlags {
+    #[darling(default)]
+    always: bool,
 }
 
 pub(crate) fn cached_query(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -136,16 +145,10 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
         s.finish()
     } };
 
-    let execute_block = if args.result {
-        quote_spanned!(block.span() => #block?)
+    let get_value = if args.result {
+        quote! { __query.get_or_insert_result::<u64, #return_type>(&__hash, || #block)?.clone() }
     } else {
-        quote_spanned!(block.span() => #block)
-    };
-
-    let return_value = if args.result {
-        quote! { Ok(__value) }
-    } else {
-        quote! { __value }
+        quote! { __query.get_or_insert::<u64, #return_type>(&__hash, || #block).clone() }
     };
 
     quote! {
@@ -153,14 +156,7 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
         let __db = ::lume_architect::DatabaseContext::db(#db_expr);
         let mut __query = __db.get_or_add_query(stringify!(#ident), || { #query_flags });
 
-        if let Some(__value) = __query.get::<u64, #return_type>(&__hash) {
-            return #return_value;
-        }
-
-        let __value = #execute_block;
-        __query.insert(&__hash, __value.clone());
-
-        #return_value
+        #get_value
     }
 }
 
@@ -211,6 +207,15 @@ fn get_default_cache_keys(inputs: &Punctuated<syn::FnArg, syn::Token![,]>) -> pr
     quote_spanned!(inputs.span() => #ident)
 }
 
-fn get_query_flags(_args: &CacheMacroArgs) -> proc_macro2::TokenStream {
-    quote! { ::lume_architect::QueryFlags::empty() }
+fn get_query_flags(args: &CacheMacroArgs) -> proc_macro2::TokenStream {
+    let mut flags = quote! { let mut __flags = ::lume_architect::QueryFlags::empty(); };
+
+    if args.flags.always {
+        flags.append_all(quote! { __flags.insert(::lume_architect::QueryFlags::ALWAYS); });
+    }
+
+    let mut stream = flags.to_token_stream();
+    stream.append_all(quote! { __flags });
+
+    quote! { { #stream } }
 }

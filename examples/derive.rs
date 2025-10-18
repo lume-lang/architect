@@ -12,7 +12,7 @@ impl DatabaseContext for Context {
 
 impl Context {
     // this method is reeeally slow, so don't run it too often!
-    #[cached_query]
+    #[cached_query(always)]
     pub fn slow_method(&self, count: usize) -> String {
         println!("running slow_method");
 
