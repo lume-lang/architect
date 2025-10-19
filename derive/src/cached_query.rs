@@ -15,9 +15,6 @@ struct CacheMacroArgs {
     key: Option<Expr>,
 
     #[darling(default)]
-    on_cycle: Option<Expr>,
-
-    #[darling(default)]
     result: bool,
 
     #[darling(flatten)]
@@ -154,24 +151,13 @@ fn build_block(args: &CacheMacroArgs, input: &ItemFn) -> proc_macro2::TokenStrea
         quote! { __db.execute_query(#query_name, &__hash, || { #block }) }
     };
 
-    let handle_cycle = if let Some(cycle) = &args.on_cycle {
-        quote! { return #cycle(#db_expr); }
-    } else {
-        quote! { panic!("cycle detected while executing query `{}`, and `on_cycle` is not defined", #query_name); }
-    };
-
     quote! {
         let __hash = #calculate_hash_expr;
         let __db = ::lume_architect::DatabaseContext::db(#db_expr);
 
         __db.ensure_query_exists(#query_name, || { #query_flags });
 
-        match #execute_query {
-            ::lume_architect::QueryResult::Ok(__val) => __val,
-            ::lume_architect::QueryResult::Err(::lume_architect::QueryError::Cycle) => {
-                #handle_cycle
-            },
-        }
+        #execute_query
     }
 }
 

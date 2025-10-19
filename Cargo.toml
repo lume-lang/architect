@@ -16,6 +16,7 @@ lume_architect_derive = { path = "derive", version = "=0.0.1", optional = true }
 bitflags = "^2"
 fxhash = "^0"
 indexmap = "^2"
+parking_lot = "^0"
 
 [features]
 default = ["derive"]

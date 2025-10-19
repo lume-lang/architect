@@ -36,16 +36,6 @@ use proc_macro::TokenStream;
 ///   ```rs
 ///   #[cached_query(result)]
 ///   ```
-///
-/// - `on_cycle`: (optional, expr) specifices how to handle queries which calls
-///   themselves using the same arguments, creating an infinite loop. The
-///   expression should be a closure, accepting a single argument of the
-///   database instance.
-///
-///   Example:
-///   ```rs
-///   #[cached_query(on_cycle = { |_| String::from("default value") })]
-///   ```
 #[proc_macro_attribute]
 pub fn cached_query(args: TokenStream, input: TokenStream) -> TokenStream {
     cached_query::cached_query(args, input)

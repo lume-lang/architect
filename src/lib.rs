@@ -1,30 +1,11 @@
 use std::any::Any;
-use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::ops::DerefMut;
 
 use bitflags::bitflags;
-use indexmap::IndexSet;
 #[cfg(feature = "derive")]
 pub use lume_architect_derive::cached_query;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryError {
-    Cycle,
-}
-
-impl std::fmt::Display for QueryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cycle => write!(f, "cycle detected"),
-        }
-    }
-}
-
-impl std::error::Error for QueryError {}
-
-pub type QueryResult<T> = Result<T, QueryError>;
+use parking_lot::RwLock;
 
 /// Represents a unique index, referencing a [`Query`] within a [`Database`].
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,7 +165,6 @@ impl Query {
 #[derive(Default)]
 pub(crate) struct DatabaseInner {
     pub(crate) queries: HashMap<QueryId, Query>,
-    pub(crate) active: IndexSet<(QueryId, ResultKey)>,
 }
 
 impl DatabaseInner {
@@ -251,7 +231,7 @@ impl DatabaseInner {
 
 #[derive(Default)]
 pub struct Database {
-    inner: UnsafeCell<DatabaseInner>,
+    inner: RwLock<DatabaseInner>,
 }
 
 impl Database {
@@ -263,16 +243,15 @@ impl Database {
     /// Retrieves a shared read access to the [`DatabaseInner`]'s inner
     /// instance.
     #[inline]
-    pub(crate) fn read(&self) -> &DatabaseInner {
-        unsafe { self.inner.get().as_ref() }.unwrap()
+    pub(crate) fn read(&self) -> parking_lot::RwLockReadGuard<'_, DatabaseInner> {
+        self.inner.try_read().unwrap()
     }
 
     /// Retrieves an exclusive-write access to the [`DatabaseInner`]'s inner
     /// instance.
     #[inline]
-    #[expect(clippy::mut_from_ref)]
-    pub(crate) fn write(&self) -> &mut DatabaseInner {
-        unsafe { self.inner.get().as_mut() }.unwrap()
+    pub(crate) fn write(&self) -> parking_lot::RwLockWriteGuard<'_, DatabaseInner> {
+        self.inner.try_write().unwrap()
     }
 
     /// Clears all results from the query with the given name.
@@ -289,14 +268,14 @@ impl Database {
 
     /// Retrieves a shared read access to the [`Query`] which matches the given
     /// query name.
-    pub fn query(&self, name: &str) -> &Query {
-        self.read().query(name)
+    pub fn query(&self, name: &str) -> parking_lot::MappedRwLockReadGuard<'_, Query> {
+        parking_lot::RwLockReadGuard::map(self.read(), |db| db.query(name))
     }
 
     /// Retrieves an exclusive-write access to the [`Query`] which matches the
     /// given query name.
-    pub fn query_mut(&self, name: &str) -> &mut Query {
-        self.write().query_mut(name)
+    pub fn query_mut(&self, name: &str) -> parking_lot::MappedRwLockWriteGuard<'_, Query> {
+        parking_lot::RwLockWriteGuard::map(self.write(), |db| db.query_mut(name))
     }
 
     /// Ensures that a [`Query`] with the given name exists. If the query does
@@ -319,13 +298,18 @@ impl Database {
     /// the key could not be found within the instance, `f` is invoked and the
     /// result is cloned and inserted into the instance. After the result is
     /// stored, the original result is returned.
-    pub fn execute_query<K: Hash, T: Clone + 'static>(
-        &self,
-        name: &str,
-        key: &K,
-        f: impl FnOnce() -> T,
-    ) -> QueryResult<T> {
-        self.call_query(name, key, |query| query.get_or_insert(key, f).clone())
+    pub fn execute_query<K: Hash, T: Clone + 'static>(&self, name: &str, key: &K, f: impl FnOnce() -> T) -> T {
+        // Place inside a scope, forcing the read lock to drop.
+        let cached = { self.query(name).get::<K, T>(key).cloned() };
+
+        if let Some(cached) = cached {
+            return cached;
+        }
+
+        let value = f();
+        self.query_mut(name).insert::<K, T>(key, value.clone());
+
+        value
     }
 
     /// Looks up the given key within the query instance with the given name.
@@ -344,33 +328,15 @@ impl Database {
         name: &str,
         key: &K,
         f: impl FnOnce() -> Result<T, E>,
-    ) -> QueryResult<Result<T, E>> {
-        self.call_query(name, key, |query| Ok(query.get_or_insert_result(key, f)?.clone()))
-    }
+    ) -> Result<T, E> {
+        // Place inside a scope, forcing the read lock to drop.
+        let cached = { self.query(name).get::<K, T>(key).cloned() };
 
-    /// Calls the [`Query`] with the given name, passing it to the given closure
-    /// `f`.
-    ///
-    /// # Panics
-    ///
-    /// The query key is added to the set of active queries, allowing the
-    /// database to detect for cycles. If a cycle is found, the
-    /// corresponding query handler is invoked. If none is found, the method
-    /// panics.
-    fn call_query<K: Hash, T>(&self, name: &str, key: &K, f: impl FnOnce(&mut Query) -> T) -> QueryResult<T> {
-        let query_id = QueryId::from_name(name);
-        let result_key = ResultKey::from_hashable(key);
-
-        // If the query with the same arguments already exists within the set,
-        // we're in a cycle.
-        if !self.write().active.insert((query_id, result_key)) {
-            return Err(QueryError::Cycle);
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
 
-        let result = f(self.query_mut(name).deref_mut());
-        self.write().active.pop();
-
-        Ok(result)
+        f().inspect(|v| self.query_mut(name).insert::<K, T>(key, v.clone()))
     }
 }
 
