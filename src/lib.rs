@@ -229,8 +229,8 @@ impl DatabaseInner {
     }
 }
 
-#[derive(Default)]
 pub struct Database {
+    enabled: RwLock<bool>,
     inner: RwLock<DatabaseInner>,
 }
 
@@ -252,6 +252,24 @@ impl Database {
     #[inline]
     pub(crate) fn write(&self) -> parking_lot::RwLockWriteGuard<'_, DatabaseInner> {
         self.inner.try_write().unwrap()
+    }
+
+    /// Determines if the caching mechanism is enabled.
+    #[inline]
+    pub fn caching_enabled(&self) -> bool {
+        *self.enabled.try_read().unwrap()
+    }
+
+    /// Disables the caching mechanism for all queries.
+    #[inline]
+    pub fn disable_caching(&self) {
+        *self.enabled.try_write().unwrap() = false;
+    }
+
+    /// Enables the caching mechanism for all queries.
+    #[inline]
+    pub fn enable_caching(&self) {
+        *self.enabled.try_write().unwrap() = true;
     }
 
     /// Clears all results from the query with the given name.
@@ -299,8 +317,11 @@ impl Database {
     /// result is cloned and inserted into the instance. After the result is
     /// stored, the original result is returned.
     pub fn execute_query<K: Hash, T: Clone + 'static>(&self, name: &str, key: &K, f: impl FnOnce() -> T) -> T {
-        // Place inside a scope, forcing the read lock to drop.
-        let cached = { self.query(name).get::<K, T>(key).cloned() };
+        let cached = if self.caching_enabled() {
+            self.query(name).get::<K, T>(key).cloned()
+        } else {
+            None
+        };
 
         if let Some(cached) = cached {
             return cached;
@@ -329,14 +350,26 @@ impl Database {
         key: &K,
         f: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
-        // Place inside a scope, forcing the read lock to drop.
-        let cached = { self.query(name).get::<K, T>(key).cloned() };
+        let cached = if self.caching_enabled() {
+            self.query(name).get::<K, T>(key).cloned()
+        } else {
+            None
+        };
 
         if let Some(cached) = cached {
             return Ok(cached);
         }
 
         f().inspect(|v| self.query_mut(name).insert::<K, T>(key, v.clone()))
+    }
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Self {
+            enabled: RwLock::new(true),
+            inner: RwLock::new(DatabaseInner::default()),
+        }
     }
 }
 
